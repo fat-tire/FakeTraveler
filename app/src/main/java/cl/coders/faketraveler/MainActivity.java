@@ -1,7 +1,9 @@
 package cl.coders.faketraveler;
 
-import android.app.AlarmManager;
-import android.app.PendingIntent;
+import static cl.coders.faketraveler.MainActivity.SourceChange.CHANGE_FROM_EDITTEXT;
+import static cl.coders.faketraveler.MainActivity.SourceChange.CHANGE_FROM_MAP;
+import static cl.coders.faketraveler.MainActivity.SourceChange.NONE;
+
 import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
@@ -10,31 +12,33 @@ import android.content.pm.PackageManager;
 import android.location.LocationManager;
 import android.os.Build;
 import android.os.Bundle;
-import androidx.appcompat.app.AppCompatActivity;
+import android.os.Handler;
 import android.text.Editable;
 import android.text.TextWatcher;
-import android.view.View;
+import android.util.Log;
 import android.webkit.WebChromeClient;
 import android.webkit.WebView;
-import android.widget.Button;
 import android.widget.EditText;
 import android.widget.Toast;
 
-import static cl.coders.faketraveler.MainActivity.SourceChange.CHANGE_FROM_EDITTEXT;
-import static cl.coders.faketraveler.MainActivity.SourceChange.CHANGE_FROM_MAP;
-import static cl.coders.faketraveler.MainActivity.SourceChange.NONE;
+import androidx.appcompat.app.AppCompatActivity;
+import androidx.core.os.ConfigurationCompat;
+
+import com.google.android.material.button.MaterialButton;
+
+import java.util.Locale;
 
 
 public class MainActivity extends AppCompatActivity {
 
     static final String sharedPrefKey = "cl.coders.mockposition.sharedpreferences";
     static final int KEEP_GOING = 0;
-    static private int SCHEDULE_REQUEST_CODE = 1;
-    public static Intent serviceIntent;
-    public static PendingIntent pendingIntent;
-    public static AlarmManager alarmManager;
-    static Button button0;
-    static Button button1;
+
+    public static Handler sim_handler = new Handler();
+    public static Runnable sim_runnable;
+
+    static MaterialButton button_applyStop;
+    static MaterialButton button_settings;
     static WebView webView;
     static EditText editTextLat;
     static EditText editTextLng;
@@ -43,6 +47,11 @@ public class MainActivity extends AppCompatActivity {
     static SharedPreferences.Editor editor;
     static Double lat;
     static Double lng;
+
+    static Double simLat = 0.0;
+    static Double simLon = 0.0;
+    static Boolean simInit = false;
+
     static int timeInterval;
     static int howManyTimes;
     static long endTime;
@@ -66,28 +75,19 @@ public class MainActivity extends AppCompatActivity {
         context = getApplicationContext();
         webView = findViewById(R.id.webView0);
         webAppInterface = new WebAppInterface(this, this);
-        alarmManager = (AlarmManager) this.getSystemService(Context.ALARM_SERVICE);
         sharedPref = context.getSharedPreferences(sharedPrefKey, Context.MODE_PRIVATE);
         editor = sharedPref.edit();
 
-        button0 = (Button) findViewById(R.id.button0);
-        button1 = (Button) findViewById(R.id.button1);
-        editTextLat = findViewById(R.id.editText0);
-        editTextLng = findViewById(R.id.editText1);
+        button_applyStop = findViewById(R.id.button_applyStop);
+        button_settings = findViewById(R.id.button_settings);
+        editTextLat = findViewById(R.id.editTextLat);
+        editTextLng = findViewById(R.id.editTextLng);
 
-        button0.setOnClickListener(new View.OnClickListener() {
-            @Override
-            public void onClick(View arg0) {
-                applyLocation();
-            }
-        });
+        button_applyStop.setOnClickListener(arg0 -> applyLocation());
 
-        button1.setOnClickListener(new View.OnClickListener() {
-            @Override
-            public void onClick(View arg0) {
-                Intent myIntent = new Intent(getBaseContext(), MoreActivity.class);
-                startActivity(myIntent);
-            }
+        button_settings.setOnClickListener(arg0 -> {
+            Intent myIntent = new Intent(getBaseContext(), MoreActivity.class);
+            startActivity(myIntent);
         });
 
         webView.getSettings().setJavaScriptEnabled(true);
@@ -98,9 +98,13 @@ public class MainActivity extends AppCompatActivity {
 
         try {
             PackageInfo pInfo = this.getPackageManager().getPackageInfo(getPackageName(), 0);
-            currentVersion = pInfo.versionCode;
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                currentVersion = (int) (pInfo.getLongVersionCode() >> 32);
+            } else {
+                currentVersion = pInfo.versionCode;
+            }
         } catch (PackageManager.NameNotFoundException e) {
-            e.printStackTrace();
+            Log.e(MainActivity.class.toString(), e.toString());
         }
 
         checkSharedPrefs();
@@ -111,10 +115,13 @@ public class MainActivity extends AppCompatActivity {
         try {
             lat = Double.parseDouble(sharedPref.getString("lat", ""));
             lng = Double.parseDouble(sharedPref.getString("lng", ""));
-            editTextLat.setText(lat.toString());
-            editTextLng.setText(lng.toString());
+            Locale locale = ConfigurationCompat.getLocales(getResources().getConfiguration()).get(0);
+            if (locale != null) {
+                editTextLat.setText(String.format(locale, "%f", lat));
+                editTextLng.setText(String.format(locale, "%f", lng));
+            }
         } catch (NumberFormatException e) {
-            e.printStackTrace();
+            Log.e(MainActivity.class.toString(), e.toString());
         }
 
         editTextLat.addTextChangedListener(new TextWatcher() {
@@ -171,12 +178,14 @@ public class MainActivity extends AppCompatActivity {
 
         endTime = sharedPref.getLong("endTime", 0);
 
-        if (pendingIntent != null && endTime > System.currentTimeMillis()) {
+
+        //2do check running on start?
+        if ( endTime > System.currentTimeMillis()) {
             changeButtonToStop();
         } else {
             endTime = 0;
             editor.putLong("endTime", 0);
-            editor.commit();
+            editor.apply();
         }
 
     }
@@ -184,17 +193,7 @@ public class MainActivity extends AppCompatActivity {
     @Override
     public void onDestroy() {
         super.onDestroy();
-        toast(context.getResources().getString(R.string.ApplyMockBroadRec_Closed));
         stopMockingLocation();
-    }
-
-    @Override
-    public void onPause() {
-        super.onPause();
-        if (isFinishing()) {
-            toast(context.getResources().getString(R.string.ApplyMockBroadRec_Closed));
-            stopMockingLocation();
-        }
     }
 
     /**
@@ -206,11 +205,13 @@ public class MainActivity extends AppCompatActivity {
         String lng = sharedPref.getString("lng", "N/A");
         String howManyTimes = sharedPref.getString("howManyTimes", "N/A");
         String timeInterval = sharedPref.getString("timeInterval", "N/A");
+        String dMockLon = sharedPref.getString("DMockLon", "0");
+        String dMockLat = sharedPref.getString("DMockLat", "0");
         Long endTime = sharedPref.getLong("endTime", 0);
 
         if (version != currentVersion) {
             editor.putInt("version", currentVersion);
-            editor.commit();
+            editor.apply();
         }
 
         try {
@@ -218,6 +219,8 @@ public class MainActivity extends AppCompatActivity {
             Double.parseDouble(lng);
             Double.parseDouble(howManyTimes);
             Double.parseDouble(timeInterval);
+            Double.parseDouble(dMockLon);
+            Double.parseDouble(dMockLat);
         } catch (NumberFormatException e) {
             editor.clear();
             editor.putString("lat", lat);
@@ -225,9 +228,11 @@ public class MainActivity extends AppCompatActivity {
             editor.putInt("version", currentVersion);
             editor.putString("howManyTimes", "1");
             editor.putString("timeInterval", "10");
+            editor.putString("DMockLon", "0");
+            editor.putString("DMockLat", "0");
             editor.putLong("endTime", 0);
-            editor.commit();
-            e.printStackTrace();
+            editor.apply();
+            Log.e(MainActivity.class.toString(), e.toString());
         }
 
     }
@@ -246,10 +251,9 @@ public class MainActivity extends AppCompatActivity {
         lng = Double.parseDouble(editTextLng.getText().toString());
 
         toast(context.getResources().getString(R.string.MainActivity_MockApplied));
-
-        endTime = System.currentTimeMillis() + (howManyTimes - 1) * timeInterval * 1000;
+        endTime = System.currentTimeMillis() + (howManyTimes - 1L) * timeInterval * 1000L;
         editor.putLong("endTime", endTime);
-        editor.commit();
+        editor.apply();
 
         changeButtonToStop();
 
@@ -257,8 +261,7 @@ public class MainActivity extends AppCompatActivity {
             mockNetwork = new MockLocationProvider(LocationManager.NETWORK_PROVIDER, context);
             mockGps = new MockLocationProvider(LocationManager.GPS_PROVIDER, context);
         } catch (SecurityException e) {
-            e.printStackTrace();
-            MainActivity.toast(context.getResources().getString(R.string.ApplyMockBroadRec_MockNotApplied));
+            Log.e(MainActivity.class.toString(), e.toString());
             stopMockingLocation();
             return;
         }
@@ -288,10 +291,42 @@ public class MainActivity extends AppCompatActivity {
         } catch (Exception e) {
             toast(context.getResources().getString(R.string.MainActivity_MockNotApplied));
             changeButtonToApply();
-            e.printStackTrace();
-            return;
+            Log.e(MainActivity.class.toString(), e.toString());
         }
     }
+
+    /**
+     * Set a mocked location based on simulation
+     * Simulation starts after first position is set.
+     * Map becomes updated during simulation
+     * text box only after simulation is stopped
+     */
+    static void simu_exec() {
+        if(!simInit){ // first call in simulation - take current position
+            simLat = lat + Double.parseDouble(sharedPref.getString("DMockLat", "0")) / 1000000;
+            simLon = lng + Double.parseDouble(sharedPref.getString("DMockLon", "0")) / 1000000;
+            simInit = true;
+        }else{
+            simLat = simLat + Double.parseDouble(sharedPref.getString("DMockLat", "0")) / 1000000;
+            simLon = simLon + Double.parseDouble(sharedPref.getString("DMockLon", "0")) / 1000000;
+        }
+
+        try {
+            //MockLocationProvider mockNetwork = new MockLocationProvider(LocationManager.NETWORK_PROVIDER, context);
+            mockNetwork.pushLocation(simLat, simLon);
+            //MockLocationProvider mockGps = new MockLocationProvider(LocationManager.GPS_PROVIDER, context);
+            mockGps.pushLocation(simLat, simLon);
+
+            //move map but not edit text
+            webView.loadUrl("javascript:setOnMap(" + simLat + "," + simLon + ");");
+        } catch (Exception e) {
+            toast(context.getResources().getString(R.string.MainActivity_MockNotApplied));
+            changeButtonToApply();
+            Log.e(MainActivity.class.toString(), e.toString());
+        }
+    }
+
+
 
     /**
      * Check if mocking location should be stopped
@@ -301,11 +336,7 @@ public class MainActivity extends AppCompatActivity {
     static boolean hasEnded() {
         if (howManyTimes == KEEP_GOING) {
             return false;
-        } else if (System.currentTimeMillis() > endTime) {
-            return true;
-        } else {
-            return false;
-        }
+        } else return System.currentTimeMillis() > endTime;
     }
 
     /**
@@ -314,30 +345,43 @@ public class MainActivity extends AppCompatActivity {
      * @param seconds number of seconds
      */
     static void setAlarm(int seconds) {
-        serviceIntent = new Intent(context, ApplyMockBroadcastReceiver.class);
-        pendingIntent = PendingIntent.getBroadcast(context, SCHEDULE_REQUEST_CODE, serviceIntent, PendingIntent.FLAG_CANCEL_CURRENT | PendingIntent.FLAG_IMMUTABLE);
-
         try {
-            if (Build.VERSION.SDK_INT >= 19) {
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-                    alarmManager.setExactAndAllowWhileIdle(AlarmManager.RTC, System.currentTimeMillis() + seconds * 1000, pendingIntent);
-                } else {
-                    alarmManager.setExact(AlarmManager.RTC, System.currentTimeMillis() + timeInterval * 1000, pendingIntent);
-                }
-            } else {
-                alarmManager.set(AlarmManager.RTC, System.currentTimeMillis() + timeInterval * 1000, pendingIntent);
-            }
+            setSimTimer(seconds*1000L);
 
-        } catch (Exception e) {
-            e.printStackTrace();
+        } catch (SecurityException e) {
+            Log.e(MainActivity.class.toString(), e.toString());
         }
     }
+
+    protected static void setSimTimer(long ms_delay) {
+        sim_handler.postDelayed(sim_runnable = new Runnable() {
+            public void run() {
+                try {
+                    simu_exec();
+
+                    if (!hasEnded()) {
+                        sim_handler.postDelayed(sim_runnable, ms_delay); // next timer
+                    } else {
+                        stopMockingLocation();
+                    }
+                } catch (Exception e) {
+                    Log.e(MainActivity.class.toString(), e.toString());
+                }
+            }
+        }, ms_delay);
+    }
+
+    protected static void stopSimTimer() {
+        sim_handler.removeCallbacks(sim_runnable); //stop handler - remove callback
+        toast(context.getResources().getString(R.string.MainActivity_MockStopped));
+    }
+
 
     /**
      * Shows a toast
      */
     static void toast(String str) {
-        Toast.makeText(context, str, Toast.LENGTH_LONG).show();
+        Toast.makeText(context, str, Toast.LENGTH_SHORT).show();
     }
 
     /**
@@ -360,47 +404,37 @@ public class MainActivity extends AppCompatActivity {
     protected static void stopMockingLocation() {
         changeButtonToApply();
         editor.putLong("endTime", System.currentTimeMillis() - 1);
-        editor.commit();
+        editor.apply();
 
-        if (pendingIntent != null) {
-            alarmManager.cancel(pendingIntent);
-            toast(context.getResources().getString(R.string.MainActivity_MockStopped));
-        }
 
         if (mockNetwork != null)
             mockNetwork.shutdown();
         if (mockGps != null)
             mockGps.shutdown();
+
+        if(simInit){
+            simInit = false;
+            // simulation moves map but does not update the text box
+            // set text box to map position
+            setLatLng(simLat.toString(), simLon.toString(), CHANGE_FROM_MAP);
+        }
+        stopSimTimer();
     }
 
     /**
      * Changes the button to Apply, and its behavior.
      */
     static void changeButtonToApply() {
-        button0.setText(context.getResources().getString(R.string.ActivityMain_Apply));
-        button0.setOnClickListener(new View.OnClickListener() {
-
-            @Override
-            public void onClick(View arg0) {
-                applyLocation();
-            }
-
-        });
+        button_applyStop.setText(context.getResources().getString(R.string.ActivityMain_Apply));
+        button_applyStop.setOnClickListener(arg0 -> applyLocation());
     }
 
     /**
      * Changes the button to Stop, and its behavior.
      */
     static void changeButtonToStop() {
-        button0.setText(context.getResources().getString(R.string.ActivityMain_Stop));
-        button0.setOnClickListener(new View.OnClickListener() {
-
-            @Override
-            public void onClick(View arg0) {
-                stopMockingLocation();
-            }
-
-        });
+        button_applyStop.setText(context.getResources().getString(R.string.ActivityMain_Stop));
+        button_applyStop.setOnClickListener(arg0 -> stopMockingLocation());
     }
 
     /**
@@ -425,7 +459,7 @@ public class MainActivity extends AppCompatActivity {
 
         editor.putString("lat", mLat);
         editor.putString("lng", mLng);
-        editor.commit();
+        editor.apply();
     }
 
     /**
